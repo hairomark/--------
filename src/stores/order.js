@@ -62,130 +62,189 @@ const initialOrders = [
 
 export const useOrderStore = defineStore('order', {
   state: () => ({
-    orders: [],
-    loading: false,
-    selectedOrder: null
+    orders: initialOrders,
+    selectedOrder: null,
+    selectedOrderIds: new Set()  // 添加选中订单ID集合
   }),
 
-  actions: {
-    async fetchOrders() {
-      console.log('开始获取订单数据')
-      this.loading = true
-      try {
-        await new Promise(resolve => setTimeout(resolve, 500))
-        
-        // 从 localStorage 获取数据，如果没有则使用初始数据
-        const savedOrders = localStorage.getItem('orders')
-        const mockOrders = savedOrders ? JSON.parse(savedOrders) : initialOrders
+  getters: {
+    // 获取所有订单
+    allOrders: (state) => {
+      return state.orders || []
+    },
 
-        console.log('设置订单数据:', mockOrders)
-        this.orders = mockOrders
+    // 获取待分配的订单
+    pendingOrders: (state) => {
+      return (state.orders || []).filter(order => order.status === 'pending')
+    },
+
+    // 获取指定司机的订单
+    getDriverOrders: (state) => (driverId) => {
+      return state.orders
+        .filter(order => 
+          order.status === 'assigned' && order.driverId === driverId
+        )
+        .sort((a, b) => (a.stopNumber || 0) - (b.stopNumber || 0))  // 按 stopNumber 排序
+    },
+
+    // 获取选中的订单列表
+    selectedOrders: (state) => {
+      return state.orders.filter(order => state.selectedOrderIds.has(order.id))
+    }
+  },
+
+  actions: {
+    // 分配订单给司机
+    async assignOrder(orderId, driverId, routeNumber = null, stopNumber = null) {
+      try {
+        // 找到要分配的订单
+        const orderIndex = this.orders.findIndex(o => o.id === orderId)
+        if (orderIndex === -1) return
+
+        // 获取司机信息以获取颜色
+        const driverStore = useDriverStore()
+        const driver = driverStore.allDrivers.find(d => d.id === driverId)
+        if (!driver) return
+
+        // 如果没有提供 stopNumber，则计算新的 stopNumber
+        let newStopNumber = stopNumber
+        if (newStopNumber === null) {
+          const driverOrders = this.orders.filter(order => 
+            order.status === 'assigned' && 
+            order.driverId === driverId
+          )
+          const maxStopNumber = driverOrders.reduce((max, order) => 
+            Math.max(max, order.stopNumber || 0), 0
+          )
+          newStopNumber = maxStopNumber + 1
+        }
+
+        // 更新订单状态
+        this.orders[orderIndex] = {
+          ...this.orders[orderIndex],
+          status: 'assigned',
+          driverId: driverId,
+          driverColor: driver.color,
+          routeNumber: routeNumber,
+          stopNumber: newStopNumber
+        }
+
+        // 这里应该有后端 API 调用
+        // await api.assignOrder(orderId, driverId)
       } catch (error) {
-        console.error('获取订单列表失败:', error)
-      } finally {
-        this.loading = false
+        console.error('分配订单失败:', error)
+        throw error
       }
     },
 
-    // 保存数据到 localStorage
-    saveOrders() {
-      localStorage.setItem('orders', JSON.stringify(this.orders))
+    // 取消分配订单
+    async unassignOrder(orderId) {
+      try {
+        // 找到要取消分配的订单
+        const orderIndex = this.orders.findIndex(o => o.id === orderId)
+        if (orderIndex === -1) return
+
+        // 更新订单状态
+        this.orders[orderIndex] = {
+          ...this.orders[orderIndex],
+          status: 'pending',
+          driverId: null,
+          driverColor: null,  // 清除司机颜色
+          routeNumber: null,
+          stopNumber: null
+        }
+
+        // 这里应该有后端 API 调用
+        // await api.unassignOrder(orderId)
+      } catch (error) {
+        console.error('取消分配订单失败:', error)
+        throw error
+      }
     },
 
+    // 更新订单序号
+    async updateOrderIndexes(updates) {
+      try {
+        // 首先获取受影响的司机ID
+        const firstOrder = this.orders.find(o => o.id === updates[0]?.orderId)
+        if (!firstOrder) return
+
+        const driverId = firstOrder.driverId
+
+        // 获取该司机的所有订单
+        const driverOrders = this.orders.filter(order => 
+          order.status === 'assigned' && 
+          order.driverId === driverId
+        )
+
+        // 创建一个映射来存储新的序号
+        const newIndexMap = new Map()
+        
+        // 根据更新列表设置新的 stopNumber
+        // 例如：如果原来是 [A,B,C,D] 对应 [1,2,3,4]
+        // 想要变成 [B,A,C,D]，则 B->1, A->2, C->3, D->4
+        updates.forEach(({ orderId }, index) => {
+          newIndexMap.set(orderId, index + 1)  // 序号从1开始
+        })
+
+        // 更新所有受影响的订单
+        driverOrders.forEach(order => {
+          const orderIndex = this.orders.findIndex(o => o.id === order.id)
+          if (orderIndex !== -1 && newIndexMap.has(order.id)) {
+            this.orders[orderIndex] = {
+              ...this.orders[orderIndex],
+              stopNumber: newIndexMap.get(order.id)
+            }
+          }
+        })
+
+        // 这里应该有后端 API 调用
+        // await api.updateOrderIndexes(updates)
+      } catch (error) {
+        console.error('更新订单序号失败:', error)
+        throw error
+      }
+    },
+
+    // 选择订单
     selectOrder(order) {
       this.selectedOrder = order
     },
 
+    // 清除选中的订单
     clearSelectedOrder() {
       this.selectedOrder = null
     },
 
-    async assignOrder(orderId, driverId) {
-      console.log('开始分配订单:', orderId, '给司机:', driverId)
-      
-      const order = this.orders.find(o => o.id === orderId)
-      const driverStore = useDriverStore()
-      const driver = driverStore.drivers.find(d => d.id === driverId)
-      
-      if (order && driver) {
-        // 获取该司机当前的订单数量作为新订单的序号
-        const driverOrders = this.orders.filter(o => o.driverId === driverId)
-        const stopNumber = driverOrders.length + 1
-
-        // 直接修改原始订单数据
-        order.status = 'assigned'
-        order.driverId = driverId
-        order.driverColor = driver.color
-        order.stopNumber = stopNumber
-        order.orderIndex = stopNumber
-
-        // 保存更新后的数据
-        this.saveOrders()
-
-        console.log('更新后的订单:', order)
-        return order
+    // 获取所有订单
+    async fetchOrders() {
+      try {
+        // 在实际项目中，这里应该是调用后端API
+        // 现在我们直接使用 initialOrders
+        this.orders = initialOrders
+      } catch (error) {
+        console.error('获取订单失败:', error)
+        throw error
       }
     },
 
-    async updateOrderIndexes(updates) {
-      updates.forEach(({ orderId, newIndex }) => {
-        const order = this.orders.find(o => o.id === orderId)
-        if (order) {
-          order.stopNumber = newIndex
-          order.orderIndex = newIndex
-        }
-      })
-      
-      // 保存更新后的数据
-      this.saveOrders()
-    },
-
-    async unassignOrder(orderId) {
-      console.log('开始取消分配订单:', orderId)
-      
-      const order = this.orders.find(o => o.id === orderId)
-      if (order) {
-        const driverId = order.driverId
-        const stopNumber = order.stopNumber
-
-        // 直接修改原始订单数据
-        order.status = 'pending'
-        order.driverId = null
-        order.driverColor = null
-        order.stopNumber = null
-        order.orderIndex = null
-
-        // 更新同一司机的其他订单序号
-        this.orders.forEach(o => {
-          if (o.driverId === driverId && o.stopNumber > stopNumber) {
-            o.stopNumber--
-            o.orderIndex = o.stopNumber
-          }
-        })
-
-        // 保存更新后的数据
-        this.saveOrders()
-
-        console.log('更新后的订单:', order)
-        return order
+    // 选择/取消选择订单
+    toggleOrderSelection(orderId) {
+      if (this.selectedOrderIds.has(orderId)) {
+        this.selectedOrderIds.delete(orderId)
+      } else {
+        this.selectedOrderIds.add(orderId)
       }
-    }
-  },
-
-  getters: {
-    pendingOrders: (state) => {
-      return state.orders.filter(order => order.status === 'pending')
-    },
-    
-    assignedOrders: (state) => {
-      return state.orders.filter(order => order.status === 'assigned')
     },
 
-    // 获取司机的订单列表（按 stopNumber 排序）
-    getDriverOrders: (state) => (driverId) => {
-      return state.orders
-        .filter(order => order.driverId === driverId)
-        .sort((a, b) => a.stopNumber - b.stopNumber)
+    // 批量选择订单
+    selectOrders(orderIds) {
+      orderIds.forEach(id => this.selectedOrderIds.add(id))
+    },
+
+    // 取消所有选择
+    clearSelectedOrders() {
+      this.selectedOrderIds.clear()
     }
   }
 }) 

@@ -1,355 +1,294 @@
 <template>
-  <div class="order-list resizable">
-    <div class="resize-handle"></div>
-    <div class="order-list-header">
-      <h3>订单列表</h3>
-      <div class="order-actions" v-if="selectedOrders.length > 0">
-        <span>已选择 {{ selectedOrders.length }} 个订单</span>
-        <el-button-group>
-          <el-button 
-            type="primary" 
-            size="small"
-            @click="showAssignDialog"
-          >
-            分配司机
-          </el-button>
-          <el-button 
-            type="danger" 
-            size="small"
-            @click="unassignSelectedOrders"
-          >
-            取消分配
-          </el-button>
-        </el-button-group>
+  <div class="order-list-container">
+    <div class="header">
+      <div class="header-left">
+        <h3>订单列表 ({{ filteredOrders.length }})</h3>
+        <el-switch
+          :model-value="showAllOrders"
+          @update:model-value="showAllOrders = $event"
+          active-text="全部"
+          inactive-text="待分配"
+          inline-prompt
+        />
+      </div>
+      <div class="header-right" v-if="orderStore.selectedOrders.length">
+        <span class="selected-count">已选择 {{ orderStore.selectedOrders.length }} 个订单</span>
+        <el-button 
+          type="primary" 
+          size="small"
+          :disabled="!selectedDriver"
+          @click="batchAssignOrders"
+        >
+          批量分配
+        </el-button>
       </div>
     </div>
-
-    <el-table 
-      :data="orders" 
-      @selection-change="handleSelectionChange"
-      ref="orderTableRef"
-      v-loading="loading"
-      height="300"
-    >
-      <el-table-column type="selection" width="55" />
-      <el-table-column prop="customerName" label="客户" width="120" />
-      <el-table-column prop="address" label="地址" show-overflow-tooltip />
-      <el-table-column label="司机" width="120">
-        <template #default="{ row }">
-          <template v-if="row.status === 'assigned'">
-            <el-button 
-              link 
-              type="primary" 
-              @click="showAssignDialog([row])"
-            >
-              {{ drivers.find(d => d.id === row.driverId)?.name || '未知司机' }}
-            </el-button>
-          </template>
-          <el-button 
-            v-else 
-            link 
-            type="info"
-            @click="showAssignDialog([row])"
-          >
-            分配司机
-          </el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="120">
-        <template #default="{ row }">
-          <div class="status-cell">
-            <template v-if="row.status === 'assigned'">
-              <div 
-                class="order-index" 
-                :style="{ backgroundColor: row.driverColor }"
-              >
-                {{ row.stopNumber }}
-              </div>
-              <span>已分配</span>
-            </template>
-            <template v-else>
-              <el-tag type="warning">待分配</el-tag>
-            </template>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="createTime" label="创建时间" width="150" />
-    </el-table>
-
-    <!-- 分配司机弹窗 -->
-    <el-dialog
-      v-model="assignDialogVisible"
-      title="分配司机"
-      width="400px"
-      :close-on-click-modal="false"
-    >
-      <div class="assign-dialog-content">
-        <div class="selected-orders-info" v-if="ordersToAssign.length > 0">
-          <p>选中 {{ ordersToAssign.length }} 个订单：</p>
-          <ul>
-            <li v-for="order in ordersToAssign" :key="order.id">
-              {{ order.customerName }} - {{ order.address }}
-            </li>
-          </ul>
-        </div>
-        <el-radio-group v-model="selectedDriverId" class="driver-list">
-          <el-radio 
-            v-for="driver in drivers" 
-            :key="driver.id" 
-            :label="driver.id"
-            class="driver-item"
-          >
-            <div class="driver-info">
-              <div class="color-dot" :style="{ backgroundColor: driver.color }"></div>
-              <span>{{ driver.name }}</span>
-              <el-tag size="small" :type="driver.status === '在线' ? 'success' : 'info'">
-                {{ driver.status }}
+    
+    <div class="orders-wrapper">
+      <el-empty v-if="!filteredOrders.length" :description="emptyText" />
+      
+      <div v-else class="orders">
+        <div
+          v-for="order in filteredOrders"
+          :key="order.id"
+          class="order-item"
+          :class="{ active: selectedOrder?.id === order.id }"
+        >
+          <el-checkbox 
+            v-if="order.status === 'pending'"
+            :model-value="orderStore.selectedOrderIds.has(order.id)"
+            @change="(val) => handleOrderSelect(order.id, val)"
+          />
+          <div class="order-main" @click="selectOrder(order)">
+            <div class="order-info">
+              <span class="customer-name">{{ order.customerName }}</span>
+              <el-tooltip :content="order.address" placement="top">
+                <span class="address">{{ order.address }}</span>
+              </el-tooltip>
+            </div>
+            <div class="order-status">
+              <span v-if="order.status === 'assigned'" class="stop-number">
+                #{{ order.stopNumber }}
+              </span>
+              <el-tag size="small" :type="order.status === 'pending' ? 'warning' : 'success'">
+                {{ order.status === 'pending' ? '待分配' : getDriverName(order.driverId) }}
               </el-tag>
             </div>
-          </el-radio>
-        </el-radio-group>
+          </div>
+        </div>
       </div>
-      <template #footer>
-        <span class="dialog-footer">
-          <el-button @click="assignDialogVisible = false">取消</el-button>
-          <el-button 
-            type="primary" 
-            @click="handleAssign" 
-            :disabled="!selectedDriverId"
-          >
-            确认分配
-          </el-button>
-        </span>
-      </template>
-    </el-dialog>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useOrderStore } from '@/stores/order'
 import { useDriverStore } from '@/stores/driver'
-import { storeToRefs } from 'pinia'
-import { ElMessageBox, ElMessage } from 'element-plus'
+import { ElMessage } from 'element-plus'
 
 const orderStore = useOrderStore()
 const driverStore = useDriverStore()
-const { orders, loading } = storeToRefs(orderStore)
-const { drivers } = storeToRefs(driverStore)
-const orderTableRef = ref(null)
-const selectedOrders = ref([])
 
-// 分配弹窗相关
-const assignDialogVisible = ref(false)
-const selectedDriverId = ref(null)
-const ordersToAssign = ref([])
+// 只解构需要的响应式引用
+const { selectedOrder } = storeToRefs(orderStore)
+const { selectedDriver } = storeToRefs(driverStore)
 
-// 显示分配弹窗
-const showAssignDialog = (orders = selectedOrders.value) => {
-  ordersToAssign.value = orders
-  selectedDriverId.value = null
-  assignDialogVisible.value = true
-}
+// 使用 showAllOrders 替代 viewMode
+const showAllOrders = ref(false)
 
-// 处理分配
-const handleAssign = async () => {
-  if (!selectedDriverId.value || ordersToAssign.value.length === 0) return
-
-  try {
-    for (const order of ordersToAssign.value) {
-      if (order.driverId !== selectedDriverId.value) {
-        if (order.status === 'assigned') {
-          await orderStore.unassignOrder(order.id)
-        }
-        await orderStore.assignOrder(order.id, selectedDriverId.value)
-      }
-    }
-    
-    ElMessage.success('订单分配成功')
-    assignDialogVisible.value = false
-    orderTableRef.value?.clearSelection()
-  } catch (error) {
-    ElMessage.error('订单分配失败')
-  }
-}
-
-// 处理多选变化
-const handleSelectionChange = (selection) => {
-  selectedOrders.value = selection
-}
-
-// 取消分配选中的订单
-const unassignSelectedOrders = async () => {
-  try {
-    await ElMessageBox.confirm(
-      `确定要取消分配这 ${selectedOrders.value.length} 个订单吗？`,
-      '取消分配',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }
-    )
-
-    for (const order of selectedOrders.value) {
-      if (order.status === 'assigned') {
-        await orderStore.unassignOrder(order.id)
-      }
-    }
-
-    // 清除选中状态
-    orderTableRef.value?.clearSelection()
-    ElMessage.success('订单取消分配成功')
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error('订单取消分配失败')
-    }
-  }
-}
-
-// 组件加载时获取数据
+// 添加组件挂载时的初始化
 onMounted(async () => {
-  await Promise.all([
-    orderStore.fetchOrders(),
-    driverStore.fetchDrivers()
-  ])
+  // 确保订单数据被加载
+  await orderStore.fetchOrders()
 })
+
+// 添加 watch 来监听切换
+watch(showAllOrders, (newValue) => {
+  console.log('切换显示模式:', newValue ? '全部' : '待分配')
+  console.log('当前所有订单:', orderStore.allOrders)
+  console.log('当前待分配订单:', orderStore.pendingOrders)
+})
+
+// 根据 showAllOrders 筛选订单
+const filteredOrders = computed(() => {
+  console.log('重新计算 filteredOrders')
+  console.log('showAllOrders:', showAllOrders.value)
+  const orders = showAllOrders.value 
+    ? orderStore.allOrders 
+    : orderStore.pendingOrders
+  console.log('筛选后的订单:', orders)
+  return orders
+})
+
+// 空状态文本
+const emptyText = computed(() => {
+  return showAllOrders.value ? '暂无订单' : '暂无待分配订单'
+})
+
+// 获取司机名称
+const getDriverName = (driverId) => {
+  const driver = driverStore.allDrivers.find(d => d.id === driverId)
+  return driver ? driver.name : '未知司机'
+}
+
+// 获取司机颜色
+const getDriverColor = (driverId) => {
+  const driver = driverStore.allDrivers.find(d => d.id === driverId)
+  return driver ? driver.color : '#999'
+}
+
+// 格式化路线编号
+const formatRouteNumber = (num) => {
+  return String(num).padStart(5, '0')
+}
+
+// 选择订单
+const selectOrder = (order) => {
+  if (selectedOrder.value?.id === order.id) {
+    orderStore.clearSelectedOrder()
+  } else {
+    orderStore.selectOrder(order)
+  }
+}
+
+// 处理订单选择
+const handleOrderSelect = (orderId, selected) => {
+  orderStore.toggleOrderSelection(orderId)
+}
+
+// 批量分配订单
+const batchAssignOrders = async () => {
+  if (!selectedDriver.value) return
+  
+  try {
+    const selectedOrders = orderStore.selectedOrders
+    for (const order of selectedOrders) {
+      await orderStore.assignOrder(order.id, selectedDriver.value.id)
+    }
+    orderStore.clearSelectedOrders()
+    ElMessage.success(`成功分配 ${selectedOrders.length} 个订单`)
+  } catch (error) {
+    console.error('批量分配订单失败:', error)
+    ElMessage.error('批量分配失败，请重试')
+  }
+}
 </script>
 
 <style scoped>
-.order-list {
-  position: relative;
-  min-height: 200px;
-  height: 100%;
-  resize: none;
-  overflow: hidden;
+.order-list-container {
   padding: 20px;
-  background-color: white;
-  border: none;
+  height: 100%;  /* 使容器占满可用高度 */
+  display: flex;
+  flex-direction: column;
 }
 
-.resize-handle {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 6px;
-  background: transparent;
-  cursor: ns-resize;
-  z-index: 10;
-}
-
-.resize-handle:hover {
-  background: rgba(0, 0, 0, 0.1);
-}
-
-/* 调整表格容器高度 */
-:deep(.el-table) {
-  height: calc(100% - 60px) !important; /* 减去标题和操作栏的高度 */
-}
-
-.order-list-header {
+.header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  padding: 12px 0;
 }
 
-.order-actions {
+.header-left, .header-right {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.status-cell {
+.selected-count {
+  color: #606266;
+  font-size: 14px;
+}
+
+.orders-wrapper {
+  flex: 1;  /* 占用剩余空间 */
+  overflow: hidden;  /* 防止溢出 */
+  position: relative;
+}
+
+.orders {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow-y: auto;  /* 垂直滚动 */
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+  padding-right: 8px;  /* 为滚动条留出空间 */
 }
 
-.order-index {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-weight: bold;
-  font-size: 12px;
+/* 美化滚动条 */
+.orders::-webkit-scrollbar {
+  width: 6px;
 }
 
-:deep(.el-radio-group) {
-  display: flex;
-  flex-direction: column;
+.orders::-webkit-scrollbar-thumb {
+  background-color: #909399;
+  border-radius: 3px;
 }
 
-:deep(.el-radio) {
-  margin-right: 0;
-  margin-bottom: 4px;
-}
-
-:deep(.el-table__row) {
-  height: auto;
-}
-
-:deep(.el-table__cell) {
-  padding: 8px 0;
-}
-
-.assign-dialog-content {
-  max-height: 60vh;
-  overflow-y: auto;
-}
-
-.selected-orders-info {
-  margin-bottom: 20px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid #ebeef5;
-}
-
-.selected-orders-info ul {
-  margin: 0;
-  padding-left: 20px;
-  color: #666;
-}
-
-.selected-orders-info li {
-  margin-bottom: 5px;
-}
-
-.driver-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
-}
-
-.driver-item {
-  margin: 0 !important;
-  padding: 10px;
-  border: 1px solid #ebeef5;
-  border-radius: 4px;
-  transition: all 0.3s;
-}
-
-.driver-item:hover {
+.orders::-webkit-scrollbar-track {
   background-color: #f5f7fa;
 }
 
-.driver-info {
+.header h3 {
+  margin: 0;
+  color: #303133;
+}
+
+.orders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.order-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  padding: 8px 12px;
+  background-color: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
 }
 
-.color-dot {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
+.order-main {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 0;
+  cursor: pointer;
 }
 
-:deep(.el-radio__label) {
-  padding-left: 0;
+.order-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.customer-name {
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 100px;
+}
+
+.address {
+  color: #606266;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
+.order-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.stop-number {
+  font-size: 12px;
+  font-weight: bold;
+  color: #409EFF;
+  background-color: #ECF5FF;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 添加切换按钮样式 */
+.header :deep(.el-switch) {
+  --el-switch-on-color: #409eff;
+  --el-switch-off-color: #13ce66;
+}
+
+.header :deep(.el-switch__label) {
+  color: #606266;
 }
 </style> 

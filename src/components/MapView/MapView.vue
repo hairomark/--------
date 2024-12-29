@@ -45,6 +45,7 @@ import { useDriverStore } from '@/stores/driver'
 import { Close } from '@element-plus/icons-vue'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
+import { useRouteStore } from '@/stores/route'
 
 // 检查 Mapbox token
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
@@ -56,6 +57,7 @@ mapboxgl.accessToken = MAPBOX_TOKEN
 
 const orderStore = useOrderStore()
 const driverStore = useDriverStore()
+const routeStore = useRouteStore()
 const { orders } = storeToRefs(orderStore)
 const { selectedDriver } = storeToRefs(driverStore)
 
@@ -65,7 +67,7 @@ const markers = ref([])
 const selectedOrders = ref([])
 const routeLine = ref(null)
 
-// 添加拖拽�����关的状态和方法
+// 添加拖拽关的状态和方法
 const isResizing = ref(false)
 const resizeDirection = ref(null)
 const startPos = ref({ x: 0, y: 0 })
@@ -167,9 +169,71 @@ const initMap = () => {
       controls: {
         polygon: true,
         trash: true
-      }
+      },
+      styles: [
+        // 绘制时的活动填充
+        {
+          'id': 'gl-draw-polygon-fill-active',
+          'type': 'fill',
+          'filter': ['all',
+            ['==', '$type', 'Polygon'],
+            ['==', 'active', 'true']
+          ],
+          'paint': {
+            'fill-color': '#0066FF',
+            'fill-opacity': 0.15
+          }
+        },
+        // 绘制时的活动边框
+        {
+          'id': 'gl-draw-polygon-stroke-active',
+          'type': 'line',
+          'filter': ['all',
+            ['==', '$type', 'Polygon'],
+            ['==', 'active', 'true']
+          ],
+          'paint': {
+            'line-color': '#0066FF',
+            'line-width': 2,
+            'line-dasharray': [2, 2]
+          }
+        },
+        // 顶点样式
+        {
+          'id': 'gl-draw-polygon-and-line-vertex-active',
+          'type': 'circle',
+          'filter': ['all',
+            ['==', 'meta', 'vertex'],
+            ['==', '$type', 'Point'],
+            ['!=', 'mode', 'static']
+          ],
+          'paint': {
+            'circle-radius': 6,
+            'circle-color': '#fff',
+            'circle-stroke-color': '#0066FF',
+            'circle-stroke-width': 2
+          }
+        },
+        // 中点样式
+        {
+          'id': 'gl-draw-polygon-and-line-midpoint-active',
+          'type': 'circle',
+          'filter': ['all',
+            ['==', 'meta', 'midpoint'],
+            ['==', '$type', 'Point'],
+            ['!=', 'mode', 'static']
+          ],
+          'paint': {
+            'circle-radius': 4,
+            'circle-color': '#0066FF',
+            'circle-stroke-color': '#fff',
+            'circle-stroke-width': 2
+          }
+        }
+      ]
     })
 
+    // 添加到地图
     map.value.addControl(draw.value)
 
     // 监听绘制完成事件
@@ -188,54 +252,123 @@ const initMap = () => {
   }
 }
 
-// 创建标记
+// 创建所有标记
 const createMarkers = () => {
   // 清除现有标记
   markers.value.forEach(marker => marker.remove())
   markers.value = []
 
-  // 按位置分组订单
-  const locationGroups = {}
+  // 为每个订单创建标记
   orders.value.forEach(order => {
-    if (!order.location) return
-    const key = `${order.location.lat},${order.location.lng}`
-    if (!locationGroups[key]) locationGroups[key] = []
-    locationGroups[key].push(order)
-  })
-
-  // 为每个位置创建标记
-  Object.entries(locationGroups).forEach(([key, locationOrders]) => {
-    const [lat, lng] = key.split(',').map(Number)
-    const assignedOrder = locationOrders.find(o => o.status === 'assigned')
-    const isSelected = selectedOrders.value.some(order => 
-      order.location.lat === lat && order.location.lng === lng
-    )
-
-    // 创建标记元素
-    const el = document.createElement('div')
-    el.className = 'marker'
-    el.style.backgroundColor = assignedOrder ? assignedOrder.driverColor : 
-                              (isSelected ? '#4CAF50' : '#FF0000')
-    if (assignedOrder && !isSelected) {
-      el.textContent = assignedOrder.stopNumber
-    }
-
-    // 创建弹出窗口
-    const popup = new mapboxgl.Popup({ offset: 25 })
-      .setHTML(createPopupContent(locationOrders))
-
-    // 创建标记
-    const marker = new mapboxgl.Marker({
-      element: el,
-      anchor: 'center'
-    })
-      .setLngLat([lng, lat])
-      .setPopup(popup)
-      .addTo(map.value)
-
+    const marker = createMarker(order)
+    
+    // 存储标记时添加订单ID
+    const el = marker.getElement()
+    el.dataset.orderId = order.id.toString()
+    
     markers.value.push(marker)
   })
 }
+
+// 创建单个标记
+const createMarker = (order) => {
+  const el = document.createElement('div')
+  el.className = 'marker'
+  
+  // 添加选中状态的类
+  if (orderStore.selectedOrderIds.has(order.id)) {
+    el.classList.add('selected')
+  }
+
+  // 设置标记样式
+  if (order.status === 'assigned') {
+    el.style.backgroundColor = order.driverColor
+    el.innerText = order.stopNumber
+  } else {
+    el.style.backgroundColor = '#ff6b6b'
+    el.innerText = '+'
+  }
+
+  // 创建弹出框
+  const popup = new mapboxgl.Popup({ offset: [0, -30] })
+    .setHTML(`
+      <div class="popup-content">
+        <div class="order-item">
+          <div class="order-header">
+            <strong>${order.customerName}</strong>
+          </div>
+          <div class="order-address">${order.address}</div>
+          <div class="order-status">
+            ${order.status === 'assigned' ? 
+              `已分配给: ${getDriverName(order.driverId)}` : 
+              '待分配'
+            }
+          </div>
+        </div>
+      </div>
+    `)
+
+  const marker = new mapboxgl.Marker(el)
+    .setLngLat([order.location.lng, order.location.lat])
+    .setPopup(popup)
+    .addTo(map.value)
+
+  // 添加点击事件
+  el.addEventListener('click', (e) => {
+    e.stopPropagation()
+    handleMarkerClick(order)
+    // 更新标记的选中状态
+    el.classList.toggle('selected', orderStore.selectedOrderIds.has(order.id))
+  })
+
+  return marker
+}
+
+// 获取司机名称
+const getDriverName = (driverId) => {
+  const driver = driverStore.allDrivers.find(d => d.id === driverId)
+  return driver ? driver.name : '未知司机'
+}
+
+// 处理地图上的订单选择
+const handleMarkerClick = (order) => {
+  orderStore.toggleOrderSelection(order.id)
+}
+
+// 处理区域选择
+const handleAreaSelect = (bounds) => {
+  // 获取在选择区域内的订单
+  const selectedOrders = orderStore.allOrders.filter(order => {
+    const { lng, lat } = order.location
+    return lng >= bounds.getWest() &&
+           lng <= bounds.getEast() &&
+           lat >= bounds.getSouth() &&
+           lat <= bounds.getNorth()
+  })
+  
+  // 更新选中状态
+  const orderIds = selectedOrders.map(order => order.id)
+  orderStore.selectOrders(orderIds)
+  
+  // 更新所有标记的视觉状态
+  updateMarkersSelection()
+}
+
+// 更新所有标记的选中状态
+const updateMarkersSelection = () => {
+  markers.value.forEach(marker => {
+    const el = marker.getElement()
+    const orderId = el.dataset.orderId
+    if (orderId) {
+      el.classList.toggle('selected', orderStore.selectedOrderIds.has(Number(orderId)))
+    }
+  })
+}
+
+// 监听选中状态的变化
+watch(() => orderStore.selectedOrderIds, () => {
+  updateMarkersSelection()
+}, { deep: true })
 
 // 创建弹出窗口内容
 const createPopupContent = (orders) => {
@@ -277,10 +410,20 @@ const handleDrawCreate = (e) => {
   })
 
   // 更新选中的订单
-  selectedOrders.value = [...selectedOrders.value, ...newSelectedOrders]
+  selectedOrders.value = newSelectedOrders
   
   // 更新标记样式
-  createMarkers()
+  markers.value.forEach(marker => {
+    const order = orders.value.find(o => 
+      o.location.lng === marker.getLngLat().lng && 
+      o.location.lat === marker.getLngLat().lat
+    )
+    if (order && newSelectedOrders.includes(order)) {
+      marker.getElement().classList.add('selected')
+    } else {
+      marker.getElement().classList.remove('selected')
+    }
+  })
 
   // 清除绘制的多边形
   draw.value.deleteAll()
@@ -339,16 +482,42 @@ const updateRoute = async () => {
   }
 
   const driverOrders = orderStore.getDriverOrders(selectedDriver.value.id)
-  if (driverOrders.length < 2) return
+  console.log('当前司机订单:', driverOrders)
+  
+  if (driverOrders.length < 1) {
+    console.log('没有订单，无法生成路线')
+    return
+  }
 
   // 构建路线请求
-  const coordinates = driverOrders
+  const coordinates = []
+  
+  // 添加出发点
+  coordinates.push([
+    selectedDriver.value.startLocation.location.lng,
+    selectedDriver.value.startLocation.location.lat
+  ])
+  
+  // 添加所有订单点
+  driverOrders
     .sort((a, b) => a.stopNumber - b.stopNumber)
-    .map(order => [order.location.lng, order.location.lat])
+    .forEach(order => {
+      coordinates.push([order.location.lng, order.location.lat])
+    })
+  
+  // 添加结束点
+  coordinates.push([
+    selectedDriver.value.endLocation.location.lng,
+    selectedDriver.value.endLocation.location.lat
+  ])
+  
+  console.log('路线坐标点:', coordinates)
 
   // 获取路线数据
   const response = await fetch(`https://api.mapbox.com/directions/v5/mapbox/driving/${coordinates.join(';')}?geometries=geojson&access_token=${mapboxgl.accessToken}`)
   const data = await response.json()
+  
+  console.log('Mapbox 路线响应:', data)
 
   // 更新路线图层
   if (routeLine.value) {
@@ -381,6 +550,7 @@ const updateRoute = async () => {
   })
 
   routeLine.value = true
+  console.log('路线更新完成')
 }
 
 // 监听数据变化
@@ -391,8 +561,9 @@ watch([() => orders.value, selectedDriver], () => {
   }
 }, { deep: true })
 
-// 组件挂载时初始化地图
+// 组件挂载时加载路线数据
 onMounted(() => {
+  routeStore.loadRoutes()
   initMap()
   map.value.on('load', () => {
     createMarkers()
@@ -417,6 +588,57 @@ onUnmounted(() => {
     map.value.remove()
   }
 })
+
+// 添加矩形绘制模式
+const DrawRectangle = {
+  ...MapboxDraw.modes.draw_polygon,
+  onSetup: function(opts) {
+    const polygon = this.newFeature({
+      type: 'Feature',
+      properties: {},
+      geometry: {
+        type: 'Polygon',
+        coordinates: [[]]
+      }
+    })
+    
+    this.addFeature(polygon)
+    this.clearSelectedFeatures()
+    this.updateUIClasses({ mouse: 'add' })
+    this.setActionableState({
+      trash: true
+    })
+    
+    return {
+      polygon,
+      currentVertexPosition: 0
+    }
+  },
+  
+  onMouseMove: function(state, e) {
+    if (state.currentVertexPosition === 0) {
+      state.polygon.updateCoordinate(`0.0`, e.lngLat.lng, e.lngLat.lat)
+    } else if (state.currentVertexPosition === 1) {
+      const startPoint = state.polygon.coordinates[0][0]
+      const endPoint = [e.lngLat.lng, e.lngLat.lat]
+      
+      // 创建矩形的四个角
+      state.polygon.updateCoordinate('0.1', endPoint[0], startPoint[1])
+      state.polygon.updateCoordinate('0.2', endPoint[0], endPoint[1])
+      state.polygon.updateCoordinate('0.3', startPoint[0], endPoint[1])
+      state.polygon.updateCoordinate('0.4', startPoint[0], startPoint[1])
+    }
+  },
+  
+  onClick: function(state, e) {
+    if (state.currentVertexPosition === 0) {
+      state.currentVertexPosition = 1
+      state.polygon.updateCoordinate(`0.0`, e.lngLat.lng, e.lngLat.lat)
+    } else if (state.currentVertexPosition === 1) {
+      this.changeMode('simple_select', { featureIds: [state.polygon.id] })
+    }
+  }
+}
 </script>
 
 <style>
@@ -543,14 +765,15 @@ onUnmounted(() => {
   width: 24px;
   height: 24px;
   border-radius: 50%;
+  background-color: #ff6b6b;
   color: white;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
+  text-align: center;
+  line-height: 24px;
   font-size: 12px;
-  border: 2px solid white;
   cursor: pointer;
+  transition: all 0.3s;
+  border: 2px solid white;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.1);
 }
 
 .popup-content {
@@ -621,5 +844,11 @@ onUnmounted(() => {
 .mapboxgl-canvas {
   width: 100% !important;
   height: 100% !important;
+}
+
+.marker.selected {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #409eff;
+  z-index: 2;
 }
 </style> 
